@@ -1,8 +1,9 @@
 import math, torch, torchvision
+from main import UNSPECIFIED
 
 class sin_1d:
-    def __init__(self, rate=20., amplitude=.5, dataset_size=None, train_range=[-1,1], test_range=[-2,2], **kwargs):
-        if dataset_size is None: dataset_size = 20
+    def __init__(self, rate=20., amplitude=.5, dataset_size=UNSPECIFIED, train_range=[-1, 1], test_range=[-2, 2], **kwargs):
+        if dataset_size == UNSPECIFIED: dataset_size = 20
         self.r = rate
         self.a = amplitude
         self.train_range = train_range
@@ -33,11 +34,11 @@ class sin_1d:
         yield x, self.f(x)
 
 class mnist:
-    def __init__(self, dataset_size=None):
+    def __init__(self, dataset_size=UNSPECIFIED):
         self.mnist_train = torchvision.datasets.MNIST("/tmp/mnist", download=True, train=True)
         self.mnist_test = torchvision.datasets.MNIST("/tmp/mnist", download=True, train=False)
         self.dataset_size = self.mnist_train.data.shape[0]
-        if dataset_size is not None:
+        if dataset_size is not UNSPECIFIED:
             assert dataset_size <= self.dataset_size
             self.dataset_size = dataset_size
     @property
