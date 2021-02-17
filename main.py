@@ -94,4 +94,4 @@ if __name__ == '__main__':
             plt.legend()
             plt.show()
 
-        if input("Inspect? "): 1+''
+        input("Done. ")
