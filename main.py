@@ -1,8 +1,10 @@
 import torch, argparse, inspect
 import numpy as np
+import pandas as pd
 from collections import defaultdict
 from ipdb import launch_ipdb_on_exception
 import matplotlib.pyplot as plt
+import time
 
 class defaultdotdict(defaultdict):
     def __getattr__(self, name): return self[name]
@@ -15,7 +17,44 @@ def subdictify(d):
     main.update(sub)
     return main
 def load_to_dict(s_list): return subdictify(eval(f"dict({','.join([fix_key(s) for s in s_list])})"))
+class do_periodically:
+    def __init__(self, gap, slowdown_rate=0.):
+        self.gap = gap
+        self.slowdown_rate = slowdown_rate
+        self.last = 0
+        self.step = 0
+    def __call__(self):
+        self.step += 1
+        if self.step >= self.last + self.gap:
+            self.last = self.step
+            self.gap += self.slowdown_rate
+            return True
+        else:
+            return False
+class do_time_freq:
+    def __init__(self, time_gap):
+        self.last_time = None
+        self.time_gap = time_gap * 60 ## rate is given in hours
+    def __call__(self):
+        if self.last_time is None:
+            self.last_time = time.time()
+            return False
+        elif time.time() >= self.last_time + self.time_gap:
+            self.last_time = time.time()
+            return True
+        else:
+            return False
 
+def checkpoint(filename, model=None, x=None, ys=None):
+    if filename != UNSPECIFIED:
+        if model is not None:
+            print("Saving model as " + f"out/{filename}.pt")
+            learner.nn.save(f"out/{filename}.pt")
+        if x is not None:
+            assert ys is not None
+            print("Saving log as " + f"out/{filename}.pk")
+            train_df = pd.DataFrame({"step": x, **ys})
+            train_df.to_pickle(f"out/{filename}.pk")
 
 if __name__ == '__main__':
     import tasks, algorithms
@@ -23,12 +62,14 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument("input", action='store', nargs='*')
     args = parser.parse_args().input
+    print(f"Args: {args}")
 
-    defaults = dict(steps=60000,
-                    minibatch_size=128,
-                    test_runs=100,
-                    task_class="sin_1d",
-                    algo_class="vanilla")
+    defaults = dict(minibatch_size=128,
+                    task_class="mnist",
+                    algo_class="vanilla",
+                    gpu=True,
+                    write_log_rate=10,
+                    write_model_rate=60)
 
     with launch_ipdb_on_exception():
         args = load_to_dict(args)
@@ -37,61 +78,70 @@ if __name__ == '__main__':
         assert args.task_class in all_object_names(tasks)
         assert args.algo_class in all_object_names(algorithms)
 
-        task = getattr(tasks, args.task_class)(dataset_size=args.dataset_size, **args.task)
-        learner = getattr(algorithms, args.algo_class)(task, total_steps=args.steps, dataset_size=args.dataset_size, **args.algo)
+        if torch.cuda.is_available() and args.gpu: device = torch.device('cuda:0')
+        else: device = torch.device('cpu')
 
         if args.seed != UNSPECIFIED: torch.manual_seed(args.seed)
 
-        train_losses_to_plot_x = []
-        train_losses_to_plot_y = []
-        test_losses_to_plot_x = []
-        test_losses_to_plot_y = []
+        task = getattr(tasks, args.task_class)(dataset_size=args.dataset_size, seed=args.seed, device=device, **args.task)
+        learner = getattr(algorithms, args.algo_class)(task, device=device, dataset_size=args.dataset_size, **args.algo)
+
+        should_dbg_print = do_time_freq(.1)
+        should_eval_print = do_time_freq(1)
+        should_write_model_checkpoint = do_time_freq(args.write_model_rate)
+        should_write_log = do_time_freq(args.write_log_rate)
+        should_eval = do_periodically(100, slowdown_rate=2)
+        log_dirty = False
+
+        train_logs_to_plot_x = []
+        train_logs_to_plot_y = defaultdict(list)
+        test_logs_to_plot_x = []
+        test_logs_to_plot_y = defaultdict(list)
         losses = defaultdict(list)
-        for step in range(args.steps):
+
+        step = 0
+        start_time = time.time()
+        while args.duration == UNSPECIFIED or (time.time() - start_time) / 60 > args.duration:
+            ## eval
+            if (step <= 300 and step % 15 == 0) or should_eval():
+                log_dirty = True
+                ## test eval
+                test_losses = defaultdict(list)
+                test_gen = task.test_set_iterator(2*args.minibatch_size)
+                for x_minibatch, y_minibatch, meta_minibatch in test_gen:
+                    test_loss = learner.eval(step, x_minibatch, y_minibatch, meta_minibatch)
+                    for k, v in test_loss.items(): test_losses[k] += v
+                test_logs_to_plot_x.append(step)
+                for name, vals in test_losses.items(): test_logs_to_plot_y[name].append(np.mean(vals))
+                ## train eval
+                train_gen = task.train_set_iterator(2*args.minibatch_size)
+                train_losses = defaultdict(list)
+                for x_minibatch, y_minibatch, meta_minibatch in train_gen:
+                    x_minibatch, y_minibatch = task.train_sample(meta_minibatch.shape[0])
+                    train_loss = learner.eval(step, x_minibatch, y_minibatch, meta_minibatch)
+                    for k, v in train_loss.items(): train_losses[k] += v
+                if len(train_losses) > 0:
+                    train_logs_to_plot_x.append(step)
+                    for name, vals in train_losses.items(): train_logs_to_plot_y[name].append(np.mean(vals))
+                else: ## if our data is IIID, train-set and test-set are indistinguishable
+                    train_logs_to_plot_x = test_logs_to_plot_x
+                    train_logs_to_plot_y = test_logs_to_plot_y
+                if should_eval_print():
+                    print(f"EVAL | step={step:6} | " +
+                         (' '.join([f"train_{name}={np.mean(vals):.3}" for name,vals in train_losses.items()]) + " | " if len(train_losses) > 0 else "") +
+                          ' '.join([f"test_{name}={np.mean(vals):.3}" for name,vals in test_losses.items()]), flush=True)
+
+
+            ## write to disk
+            if args.save and log_dirty and should_write_log():
+                checkpoint(f'{args.save}.train', x=train_logs_to_plot_x, ys=train_logs_to_plot_y)
+                checkpoint(f'{args.save}.test', x=test_logs_to_plot_x, ys=test_logs_to_plot_y)
+            if should_write_model_checkpoint():
+                checkpoint(args.save, model=learner.nn)
+
+            ## perform learning
             x_minibatch, y_minibatch = task.train_sample(args.minibatch_size)
             loss = learner.learn(step, x_minibatch, y_minibatch)
-            for k,v in loss.items(): losses[k].append(v)
-            if (step + 1) % 100 == 0:
-                print(f"{(step+1)/args.steps:.2%}\tstep={step+1}/{args.steps} | " + ' '.join([f"{k}={sum(v[-25:])/25:.3}" for k,v in losses.items()]))
-                train_losses_to_plot_x.append(step)
-                train_losses_to_plot_y.append(np.mean(losses['loss'][-100:]))
-            if (step + 1) % 1000 == 0:
-                print("Evaluating...")
-                test_losses = defaultdict(list)
-                test_gen = task.test_sample(args.minibatch_size)
-                for test_step in range(args.test_runs):
-                    try:
-                        x_minibatch, y_minibatch = next(test_gen)
-                        test_loss = learner.learn(step, x_minibatch, y_minibatch)
-                        for k, v in test_loss.items(): test_losses[k].append(v)
-                    except StopIteration:
-                        pass
-                for name, val in test_losses.items(): print(f"test {name}: {np.mean(val):.3}")
-                test_losses_to_plot_x.append(step)
-                test_losses_to_plot_y.append(np.mean(test_losses['loss']))
-
-        print("Training complete.")
-        if args.save != UNSPECIFIED:
-            print("Saving as " + f"models/{args.save}.pt")
-            with open(f"explore/models/{args.save}.pt", "wb") as f:
-                torch.save(learner.nn, f)
-
-        plt.plot(train_losses_to_plot_x, train_losses_to_plot_y, label="train")
-        plt.plot(test_losses_to_plot_x, test_losses_to_plot_y, label="test")
-        plt.legend()
-        plt.show()
-
-        if task.x_shape == [1]:
-            train_xs = task.dataset
-            train_ys = task.f(train_xs)
-            eval_xs = torch.linspace(*task.test_range, 1400)[:,None]
-            eval_ys = task.f(eval_xs)
-            eval_guesses = learner.nn(eval_xs).detach()
-
-            plt.scatter(train_xs, train_ys, label="train points")
-            plt.plot(eval_xs, eval_ys, label="true function")
-            plt.plot(eval_xs, eval_guesses, label="learned guesses")
-            plt.legend()
-            plt.show()
-
-        input("Done. ")
+            step += 1
+            if should_dbg_print():
+                print(f"DBG  | step={step:6} | " + ' '.join([f"{k}={v:.3}" for k, v in loss.items()]), flush=True)
