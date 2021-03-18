@@ -4,7 +4,7 @@ import pandas as pd
 from collections import defaultdict
 from ipdb import launch_ipdb_on_exception
 import matplotlib.pyplot as plt
-import time
+import time, os
 
 class defaultdotdict(defaultdict):
     def __getattr__(self, name): return self[name]
@@ -47,6 +47,7 @@ class do_time_freq:
 
 def checkpoint(filename, model=None, x=None, ys=None):
     if filename != UNSPECIFIED:
+        if not os.path.exists("out"): os.mkdir("out")
         if model is not None:
             print("Saving model as " + f"out/{filename}.pt")
             learner.nn.save(f"out/{filename}.pt")
@@ -117,7 +118,6 @@ if __name__ == '__main__':
                 train_gen = task.train_set_iterator(2*args.minibatch_size)
                 train_losses = defaultdict(list)
                 for x_minibatch, y_minibatch, meta_minibatch in train_gen:
-                    x_minibatch, y_minibatch = task.train_sample(meta_minibatch.shape[0])
                     train_loss = learner.eval(step, x_minibatch, y_minibatch, meta_minibatch)
                     for k, v in train_loss.items(): train_losses[k] += v
                 if len(train_losses) > 0:

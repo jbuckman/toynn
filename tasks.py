@@ -6,8 +6,9 @@ class mnist:
     def __init__(self, dataset_size=UNSPECIFIED, seed=UNSPECIFIED, device=None):
         self.mnist_train = torchvision.datasets.MNIST("/tmp/mnist", download=True, train=True)
         self.mnist_test = torchvision.datasets.MNIST("/tmp/mnist", download=True, train=False)
-        self.dataset_size = self.mnist_train.data.shape[0]
-        if dataset_size is not UNSPECIFIED:
+        if dataset_size == UNSPECIFIED:
+            self.dataset_size = self.mnist_train.data.shape[0]
+        else:
             assert dataset_size <= self.dataset_size
             self.dataset_size = dataset_size
         self.random = numpy.random.RandomState(seed if seed != UNSPECIFIED else None)
@@ -29,7 +30,7 @@ class mnist:
         return x[:,None,:,:].float()/255.
     def train_sample(self, n):
         idx = self.random.randint(0, self.dataset_size, [n])
-        return self.data_preproc(self.mnist_train.data[idx]), self.mnist_train.targets[idx], None
+        return self.data_preproc(self.mnist_train.data[idx]), self.mnist_train.targets[idx]
     def train_set_iterator(self, n):
         current_n = 0
         while current_n + n < self.dataset_size:
