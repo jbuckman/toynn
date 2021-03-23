@@ -50,7 +50,7 @@ def checkpoint(filename, model=None, x=None, ys=None):
         if not os.path.exists("out"): os.mkdir("out")
         if model is not None:
             print("Saving model as " + f"out/{filename}.pt")
-            learner.nn.save(f"out/{filename}.pt")
+            torch.save(learner.nn, f"out/{filename}.pt")
         if x is not None:
             assert ys is not None
             print("Saving log as " + f"out/{filename}.pk")
